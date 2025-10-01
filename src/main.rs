@@ -1,7 +1,10 @@
 mod config;
+mod github;
 
+use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand};
 use config::Config;
+use github::{GithubClient, RepoSpec};
 
 struct AppContext {
     config: Config,
@@ -11,7 +14,10 @@ struct AppContext {
 impl AppContext {
     fn load() -> std::io::Result<Self> {
         let (config, path) = Config::load()?;
-        Ok(Self { config, config_path: path })
+        Ok(Self {
+            config,
+            config_path: path,
+        })
     }
 
     fn save(&self) -> std::io::Result<()> {
@@ -86,23 +92,15 @@ struct InitArgs {
     repo: Option<String>,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let mut ctx = match AppContext::load() {
-        Ok(ctx) => ctx,
-        Err(err) => {
-            eprintln!("Failed to load config: {err}");
-            std::process::exit(1);
-        }
-    };
+    let mut ctx = AppContext::load().context("failed to load config")?;
 
     match cli.command {
-        Command::Sync => println!("[todo] sync issues"),
-        Command::Init(args) => handle_init(&mut ctx, args),
-        Command::Issue { action } => match action {
-            IssueAction::List => println!("[todo] list issues"),
-            IssueAction::View { number } => println!("[todo] view issue #{number}"),
-        },
+        Command::Sync => run_sync(&mut ctx).await?,
+        Command::Init(args) => handle_init(&mut ctx, args)?,
+        Command::Issue { action } => run_issue(&ctx, action).await?,
         Command::Note { action } => match action {
             NoteAction::Add { number, text } => {
                 println!("[todo] add note to issue #{number}: {text}")
@@ -110,9 +108,11 @@ fn main() {
             NoteAction::List { number } => println!("[todo] list notes for issue #{number}"),
         },
     }
+
+    Ok(())
 }
 
-fn handle_init(ctx: &mut AppContext, args: InitArgs) {
+fn handle_init(ctx: &mut AppContext, args: InitArgs) -> Result<()> {
     if let Some(token) = args.token {
         ctx.config.github_token = Some(token);
     }
@@ -122,15 +122,62 @@ fn handle_init(ctx: &mut AppContext, args: InitArgs) {
 
     match (&ctx.config.github_token, &ctx.config.repo) {
         (Some(_), Some(_)) => {
-            if let Err(err) = ctx.save() {
-                eprintln!("Failed to write config: {err}");
-                std::process::exit(1);
-            }
+            ctx.save().context("failed to write config")?;
             println!("Configuration saved to {}", ctx.config_path.display());
         }
         _ => {
-            eprintln!("init requires both --token and --repo");
-            std::process::exit(1);
+            anyhow::bail!("init requires both --token and --repo");
         }
     }
+
+    Ok(())
+}
+
+async fn run_sync(ctx: &mut AppContext) -> Result<()> {
+    let client = build_client(&ctx.config).await?;
+    let issues = client.list_issues().await?;
+    println!("Fetched {} issue(s)", issues.len());
+    Ok(())
+}
+
+async fn run_issue(ctx: &AppContext, action: IssueAction) -> Result<()> {
+    let client = build_client(&ctx.config).await?;
+
+    match action {
+        IssueAction::List => {
+            let issues = client.list_issues().await?;
+            if issues.is_empty() {
+                println!("No issues found");
+            } else {
+                for issue in issues {
+                    println!("#{:<6} {}", issue.number, issue.title);
+                }
+            }
+        }
+        IssueAction::View { number } => {
+            let issue = client.get_issue(number).await?;
+            println!("#{number} - {}", issue.title);
+            if let Some(body) = issue.body {
+                if !body.trim().is_empty() {
+                    println!("\n{}", body);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn build_client(config: &Config) -> Result<GithubClient> {
+    let token = config
+        .github_token
+        .as_deref()
+        .context("GitHub token not configured. Run `notehub init --token ...`")?;
+    let repo = config
+        .repo
+        .as_deref()
+        .context("Repository not configured. Run `notehub init --repo ...`")?;
+
+    let repo_spec = RepoSpec::parse(repo)?;
+    GithubClient::new(token, repo_spec).await
 }
