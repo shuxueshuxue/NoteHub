@@ -145,7 +145,7 @@ fn handle_init(ctx: &mut AppContext, args: InitArgs) -> Result<()> {
 async fn run_sync(ctx: &mut AppContext) -> Result<()> {
     let (token, repo_raw, repo_spec) = resolve_config(&ctx.config)?;
     let client = GithubClient::new(token, repo_spec.clone()).await?;
-    let issues = client.list_issues().await?;
+    let issues = client.list_issues_all().await?;
     for issue in &issues {
         ctx.storage.upsert_issue(&repo_raw, issue)?;
     }

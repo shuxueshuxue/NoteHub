@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use octocrab::Octocrab;
 
 #[derive(Clone, Debug)]
@@ -41,18 +41,32 @@ impl GithubClient {
         Ok(Self { inner, repo })
     }
 
-    pub async fn list_issues(&self) -> Result<Vec<octocrab::models::issues::Issue>> {
-        let page = self
+    pub async fn list_issues_all(&self) -> Result<Vec<octocrab::models::issues::Issue>> {
+        let mut page = self
             .inner
             .issues(&self.repo.owner, &self.repo.name)
             .list()
+            .state(octocrab::params::State::All)
             .per_page(50)
             .send()
             .await
             .context("failed to fetch issues")?;
-        Ok(page.items)
-    }
 
+        let mut items = page.items;
+        let mut next = page.next.clone();
+        while next.is_some() {
+            page = self
+                .inner
+                .get_page::<octocrab::models::issues::Issue>(&next)
+                .await
+                .context("failed to fetch next issues page")?
+                .ok_or_else(|| anyhow!("missing issues page"))?;
+            items.extend(page.items.clone());
+            next = page.next.clone();
+        }
+
+        Ok(items)
+    }
     pub async fn get_issue(&self, number: u64) -> Result<octocrab::models::issues::Issue> {
         self.inner
             .issues(&self.repo.owner, &self.repo.name)

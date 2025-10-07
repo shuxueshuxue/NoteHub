@@ -4,8 +4,8 @@ NoteHub is a Rust CLI that treats GitHub issues as a lightweight note system.
 
 ## Current Capabilities
 - Parse command-line actions via `clap` (subcommands: `sync`, `issue`, `note`, `init`).
-- `notehub init --token <PAT> --repo <owner/name>` stores your token and default repository in the per-user config directory (e.g. `~/Library/Application Support/NoteHub/config.toml` on macOS).
-- `notehub sync` pulls issues from GitHub and persists them in an on-disk SQLite cache (`~/Library/Application Support/NoteHub/notehub.db`).
+- `notehub init --token <PAT> --repo <owner/name>` stores your token and default repository in the per-user config directory (e.g. `~/Library/Application Support/com.LexicalMathical.NoteHub/config.toml` on macOS).
+- `notehub sync` pulls open **and closed** issues from GitHub and persists them in an on-disk SQLite cache (`~/Library/Application Support/com.LexicalMathical.NoteHub/notehub.db`).
 - `notehub issue list` / `notehub issue view <num>` read from the local cache; viewing an uncached issue will fetch and store it on demand.
 
 ## Limitations (MVP)
