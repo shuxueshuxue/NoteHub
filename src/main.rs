@@ -1,27 +1,36 @@
 mod config;
 mod github;
+mod storage;
+
+use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand};
 use config::Config;
 use github::{GithubClient, RepoSpec};
+use storage::{Storage, StoredIssueDetail};
 
 struct AppContext {
     config: Config,
-    config_path: std::path::PathBuf,
+    config_path: PathBuf,
+    storage: Storage,
 }
 
 impl AppContext {
-    fn load() -> std::io::Result<Self> {
+    fn load() -> Result<Self> {
         let (config, path) = Config::load()?;
+        let storage = Storage::open()?;
         Ok(Self {
             config,
             config_path: path,
+            storage,
         })
     }
 
-    fn save(&self) -> std::io::Result<()> {
-        self.config.save(&self.config_path)
+    fn save(&self) -> Result<()> {
+        self.config
+            .save(&self.config_path)
+            .context("failed to write config")
     }
 }
 
@@ -92,15 +101,15 @@ struct InitArgs {
     repo: Option<String>,
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let mut ctx = AppContext::load().context("failed to load config")?;
+    let mut ctx = AppContext::load().context("failed to initialize application state")?;
 
     match cli.command {
         Command::Sync => run_sync(&mut ctx).await?,
         Command::Init(args) => handle_init(&mut ctx, args)?,
-        Command::Issue { action } => run_issue(&ctx, action).await?,
+        Command::Issue { action } => run_issue(&mut ctx, action).await?,
         Command::Note { action } => match action {
             NoteAction::Add { number, text } => {
                 println!("[todo] add note to issue #{number}: {text}")
@@ -122,7 +131,7 @@ fn handle_init(ctx: &mut AppContext, args: InitArgs) -> Result<()> {
 
     match (&ctx.config.github_token, &ctx.config.repo) {
         (Some(_), Some(_)) => {
-            ctx.save().context("failed to write config")?;
+            ctx.save()?;
             println!("Configuration saved to {}", ctx.config_path.display());
         }
         _ => {
@@ -134,20 +143,24 @@ fn handle_init(ctx: &mut AppContext, args: InitArgs) -> Result<()> {
 }
 
 async fn run_sync(ctx: &mut AppContext) -> Result<()> {
-    let client = build_client(&ctx.config).await?;
+    let (token, repo_raw, repo_spec) = resolve_config(&ctx.config)?;
+    let client = GithubClient::new(token, repo_spec.clone()).await?;
     let issues = client.list_issues().await?;
+    for issue in &issues {
+        ctx.storage.upsert_issue(&repo_raw, issue)?;
+    }
     println!("Fetched {} issue(s)", issues.len());
     Ok(())
 }
 
-async fn run_issue(ctx: &AppContext, action: IssueAction) -> Result<()> {
-    let client = build_client(&ctx.config).await?;
+async fn run_issue(ctx: &mut AppContext, action: IssueAction) -> Result<()> {
+    let (token, repo_raw, repo_spec) = resolve_config(&ctx.config)?;
 
     match action {
         IssueAction::List => {
-            let issues = client.list_issues().await?;
+            let issues = ctx.storage.list_issues(&repo_raw)?;
             if issues.is_empty() {
-                println!("No issues found");
+                println!("No cached issues found. Run `notehub sync` to fetch the latest data.");
             } else {
                 for issue in issues {
                     println!("#{:<6} {}", issue.number, issue.title);
@@ -155,11 +168,15 @@ async fn run_issue(ctx: &AppContext, action: IssueAction) -> Result<()> {
             }
         }
         IssueAction::View { number } => {
-            let issue = client.get_issue(number).await?;
-            println!("#{number} - {}", issue.title);
-            if let Some(body) = issue.body {
-                if !body.trim().is_empty() {
-                    println!("\n{}", body);
+            if let Some(issue) = ctx.storage.get_issue(&repo_raw, number)? {
+                print_issue_detail(issue);
+            } else {
+                println!("Issue not cached locally. Fetching from GitHub...");
+                let client = GithubClient::new(token, repo_spec.clone()).await?;
+                let issue = client.get_issue(number).await?;
+                ctx.storage.upsert_issue(&repo_raw, &issue)?;
+                if let Some(detail) = ctx.storage.get_issue(&repo_raw, number)? {
+                    print_issue_detail(detail);
                 }
             }
         }
@@ -168,7 +185,17 @@ async fn run_issue(ctx: &AppContext, action: IssueAction) -> Result<()> {
     Ok(())
 }
 
-async fn build_client(config: &Config) -> Result<GithubClient> {
+fn print_issue_detail(issue: StoredIssueDetail) {
+    println!("#{} - {}", issue.number, issue.title);
+    if let Some(body) = issue.body {
+        if !body.trim().is_empty() {
+            println!("\n{}", body);
+        }
+    }
+    println!("\n(updated {})", issue.updated_at.to_rfc3339());
+}
+
+fn resolve_config(config: &Config) -> Result<(&str, String, RepoSpec)> {
     let token = config
         .github_token
         .as_deref()
@@ -177,7 +204,6 @@ async fn build_client(config: &Config) -> Result<GithubClient> {
         .repo
         .as_deref()
         .context("Repository not configured. Run `notehub init --repo ...`")?;
-
-    let repo_spec = RepoSpec::parse(repo)?;
-    GithubClient::new(token, repo_spec).await
+    let spec = RepoSpec::parse(repo)?;
+    Ok((token, repo.to_string(), spec))
 }
