@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 use octocrab::Octocrab;
+use octocrab::models::Repository;
 
 #[derive(Clone, Debug)]
 pub struct RepoSpec {
@@ -52,17 +53,15 @@ impl GithubClient {
             .await
             .context("failed to fetch issues")?;
 
-        let mut items = page.items;
-        let mut next = page.next.clone();
-        while next.is_some() {
+        let mut items = page.items.clone();
+        while page.next.is_some() {
             page = self
                 .inner
-                .get_page::<octocrab::models::issues::Issue>(&next)
+                .get_page::<octocrab::models::issues::Issue>(&page.next)
                 .await
                 .context("failed to fetch next issues page")?
                 .ok_or_else(|| anyhow!("missing issues page"))?;
             items.extend(page.items.clone());
-            next = page.next.clone();
         }
 
         Ok(items)
@@ -74,4 +73,45 @@ impl GithubClient {
             .await
             .with_context(|| format!("failed to fetch issue #{number}"))
     }
+}
+
+pub async fn list_authenticated_repos(token: &str) -> Result<Vec<String>> {
+    let octo = Octocrab::builder()
+        .personal_token(token.to_string())
+        .build()
+        .context("failed to build GitHub client")?;
+
+    let mut page = octo
+        .current()
+        .list_repos_for_authenticated_user()
+        .per_page(100)
+        .send()
+        .await
+        .context("failed to fetch repositories")?;
+
+    let mut names = Vec::new();
+
+    loop {
+        for repo in &page.items {
+            if let Some(full) = &repo.full_name {
+                names.push(full.clone());
+            } else if let Some(owner) = repo.owner.as_ref() {
+                names.push(format!("{}/{}", owner.login, repo.name));
+            } else {
+                names.push(repo.name.clone());
+            }
+        }
+
+        if page.next.is_some() {
+            page = octo
+                .get_page::<Repository>(&page.next)
+                .await
+                .context("failed to fetch next repositories page")?
+                .ok_or_else(|| anyhow!("missing repositories page"))?;
+        } else {
+            break;
+        }
+    }
+
+    Ok(names)
 }

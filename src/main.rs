@@ -115,6 +115,12 @@ enum RepoAction {
         #[arg(long)]
         set_active: bool,
     },
+    /// Add all accessible repositories, optionally excluding some
+    AddAll {
+        /// Repositories to skip while importing (owner/name).
+        #[arg(long, value_name = "owner/name")]
+        exclude: Vec<String>,
+    },
     /// Remove a repository from the configuration
     Remove { repo: String },
     /// Set the active repository
@@ -148,7 +154,7 @@ async fn main() -> Result<()> {
         Command::Sync(args) => run_sync(&mut ctx, args).await?,
         Command::Init(args) => handle_init(&mut ctx, args)?,
         Command::Issue { action } => run_issue(&mut ctx, action).await?,
-        Command::Repo { action } => run_repo(&mut ctx, action)?,
+        Command::Repo { action } => run_repo(&mut ctx, action).await?,
         Command::Note { action } => match action {
             NoteAction::Add { number, text } => {
                 println!("[todo] add note to issue #{number}: {text}");
@@ -266,7 +272,7 @@ async fn run_issue(ctx: &mut AppContext, action: IssueAction) -> Result<()> {
     Ok(())
 }
 
-fn run_repo(ctx: &mut AppContext, action: RepoAction) -> Result<()> {
+async fn run_repo(ctx: &mut AppContext, action: RepoAction) -> Result<()> {
     match action {
         RepoAction::List => {
             if ctx.config.repos().is_empty() {
@@ -296,6 +302,47 @@ fn run_repo(ctx: &mut AppContext, action: RepoAction) -> Result<()> {
                 println!("Active repository: {active}");
             }
             ctx.save()?;
+        }
+        RepoAction::AddAll { exclude } => {
+            let token = get_token(&ctx.config)?;
+            let mut exclude_set = HashSet::new();
+            for repo in exclude {
+                let normalized = Config::normalize_repo(&repo)?;
+                exclude_set.insert(normalized);
+            }
+
+            let repos = github::list_authenticated_repos(token).await?;
+            let mut added = 0usize;
+            let mut skipped_existing = 0usize;
+            let mut skipped_excluded = 0usize;
+
+            for repo in repos {
+                let normalized = Config::normalize_repo(&repo)?;
+                if exclude_set.contains(&normalized) {
+                    skipped_excluded += 1;
+                    continue;
+                }
+                let (_, was_added) = ctx.config.add_repo(&normalized)?;
+                if was_added {
+                    added += 1;
+                } else {
+                    skipped_existing += 1;
+                }
+            }
+
+            ctx.config.ensure_active_repo();
+            ctx.save()?;
+
+            println!("Imported {added} repository(ies)");
+            if skipped_existing > 0 {
+                println!("Skipped {skipped_existing} already configured repositories");
+            }
+            if skipped_excluded > 0 {
+                println!("Skipped {skipped_excluded} excluded repositories");
+            }
+            if let Some(active) = ctx.config.active_repo() {
+                println!("Active repository: {active}");
+            }
         }
         RepoAction::Remove { repo } => {
             let (normalized, removed) = ctx.config.remove_repo(&repo)?;

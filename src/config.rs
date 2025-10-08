@@ -6,29 +6,12 @@ use serde::{Deserialize, Serialize};
 
 const CONFIG_FILE_NAME: &str = "config.toml";
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Config {
     pub github_token: Option<String>,
+    #[serde(default)]
     pub repos: Vec<String>,
     pub active_repo: Option<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct RawConfig {
-    github_token: Option<String>,
-    repo: Option<String>,
-    repos: Option<Vec<String>>,
-    active_repo: Option<String>,
-}
-
-#[derive(Serialize)]
-struct PersistedConfig<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    github_token: &'a Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    repos: &'a Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    active_repo: &'a Option<String>,
 }
 
 impl Config {
@@ -40,46 +23,10 @@ impl Config {
 
         let raw_text = fs::read_to_string(&path)
             .with_context(|| format!("failed to read config at {}", path.display()))?;
-        let raw: RawConfig = toml::from_str(&raw_text)
+        let mut cfg: Self = toml::from_str(&raw_text)
             .with_context(|| format!("failed to parse config at {}", path.display()))?;
-
-        let mut repos = Vec::new();
-        if let Some(list) = raw.repos {
-            for repo in list {
-                let normalized = Self::normalize_repo(&repo)?;
-                if !repos.contains(&normalized) {
-                    repos.push(normalized);
-                }
-            }
-        }
-        if let Some(single) = raw.repo {
-            let normalized = Self::normalize_repo(&single)?;
-            if !repos.contains(&normalized) {
-                repos.push(normalized);
-            }
-        }
-
-        let mut active_repo = raw
-            .active_repo
-            .map(|repo| Self::normalize_repo(&repo))
-            .transpose()?;
-        if let Some(active) = &active_repo {
-            if !repos.contains(active) {
-                // Drop invalid active selection
-                active_repo = None;
-            }
-        }
-        if active_repo.is_none() {
-            active_repo = repos.first().cloned();
-        }
-
-        let mut config = Self {
-            github_token: raw.github_token,
-            repos,
-            active_repo,
-        };
-        config.deduplicate_repos();
-        Ok((config, path))
+        cfg.deduplicate_repos();
+        Ok((cfg, path))
     }
 
     pub fn save(&self, path: &PathBuf) -> Result<()> {
@@ -88,12 +35,7 @@ impl Config {
                 .with_context(|| format!("failed to create {}", dir.display()))?;
         }
 
-        let persisted = PersistedConfig {
-            github_token: &self.github_token,
-            repos: &self.repos,
-            active_repo: &self.active_repo,
-        };
-        let raw = toml::to_string_pretty(&persisted).context("failed to encode configuration")?;
+        let raw = toml::to_string_pretty(self).context("failed to encode configuration")?;
         fs::write(path, raw)
             .with_context(|| format!("failed to write config to {}", path.display()))?;
         Ok(())
