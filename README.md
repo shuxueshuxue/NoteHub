@@ -35,3 +35,7 @@ cargo run -- issue view <number> --repo owner/name
 ```
 
 Ensure your shell sources `~/.cargo/env` so `cargo` is on the PATH after installing Rust with `rustup`.
+
+## Resetting Data
+
+Delete the `~/Library/Application Support/com.LexicalMathical.NoteHub/` directory to wipe both config and cache; they will be recreated on next run.
